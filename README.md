@@ -2,6 +2,13 @@
 # Contrastive-Driven and Uncertainty-Guided Joint Learning for Semi-Supervised Liver Tumor Segmentation,Uncertainty and Quantification
 <img width="654" height="269" alt="method" src="https://github.com/user-attachments/assets/cf8f853e-06d7-4143-a3be-16d23995400d" />
 
+## 🚀 Highlights
+
+- **Cross-modal Knowledge Distillation**: Transfers knowledge from contrast-enhanced MRI (CEMRI) to non-contrast images (T2FS, DWI).
+- **Evidential Uncertainty Modeling**: Quantifies prediction reliability for segmentation and quantification.
+- **Joint Learning Framework**: Supports simultaneous tumor segmentation and biomarker quantification.
+- **Contrastive Representation Learning**: Enhances cross-modal feature alignment using positive/negative pair design.
+
 ## 🔗 Dataset
 Our method achieves state-of-the-art performance on the [LLD-MMRI dataset](https://github.com/LMMMEng/LLD-MMRI-Dataset) under both fully- and semi-supervised settings.
 
@@ -41,36 +48,40 @@ CdUgJL/
     ├── architecture.md  
   
 ```
-# 1. Create Environment
-You can install the required dependencies via either requirements.txt or environment.yml.
 
- Option 1: pip (recommended)
-pip install -r requirements.txt
+---
 
- Option 2: conda (optional)
+## 🔧 Installation
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/xiaojiao929/CdUgJL.git
+cd CdUgJL
+
+### 2. Set up environment (via Conda)
+
 conda env create -f environment.yml
 conda activate cd_ugjl
 
-#  2. Download Dataset
-Download the LLD-MMRI dataset from: 👉 https://github.com/LMMMEng/LLD-MMRI-Dataset
+Or use pip:
 
-Place the dataset under the data/ directory and modify the path in configs/default.yaml accordingly:
-data_root: ./data/LLD-MMRI
+pip install -r requirements.txt
 
-# 3. Train the Model
-Run the training script:
-bash scripts/run_train.sh
-Or directly:
-python train.py --config default.yaml
+🏋️‍♂️ Training
+To train the model from scratch:
+python train.py --config configs/default.yaml
 
-# 4. Evaluate the Model
-Run the test script:
-bash scripts/run_test.sh
+To resume from a checkpoint:
+python train.py --config default.yaml --resume checkpoints/meamtnet_best.pth
 
+🔍 Testing
+To evaluate the model:
+python test.py --config default.yaml --checkpoint checkpoints/meamtnet_best.pth
 
-
-
-
+###  5.Compute segmentation and quantification metrics:
+python eval/evaluation_metrics.py \
+  --ground_truth ./data/test \
+  --predictions ./outputs/
 
 
 
