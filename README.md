@@ -41,29 +41,29 @@ CdUgJL/
     ├── architecture.md  
   
 ```
-1. Create Environment
+# 1. Create Environment
 You can install the required dependencies via either requirements.txt or environment.yml.
 
-# Option 1: pip (recommended)
+ Option 1: pip (recommended)
 pip install -r requirements.txt
 
-# Option 2: conda (optional)
+ Option 2: conda (optional)
 conda env create -f environment.yml
 conda activate cd_ugjl
 
-2. Download Dataset
+#  2. Download Dataset
 Download the LLD-MMRI dataset from: 👉 https://github.com/LMMMEng/LLD-MMRI-Dataset
 
 Place the dataset under the data/ directory and modify the path in configs/default.yaml accordingly:
 data_root: ./data/LLD-MMRI
 
-3. Train the Model
+# 3. Train the Model
 Run the training script:
 bash scripts/run_train.sh
 Or directly:
 python train.py --config default.yaml
 
-4. Evaluate the Model
+# 4. Evaluate the Model
 Run the test script:
 bash scripts/run_test.sh
 
