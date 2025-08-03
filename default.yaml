@@ -1,0 +1,76 @@
+configs/default.yaml
+
+# Amber
+# MIT License
+# Copyright (c) 2025 Amber Xiao
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# ------------------------ Dataset ------------------------ #
+dataset:
+  name: LLD-MMRI
+  root: ./data/LLD-MMRI
+  modalities: [T2FS, DWI]
+  label_ratio: 0.2
+  input_size: [256, 256]
+  num_classes: 2
+  task: multi-task  # options: segmentation / quantification / multi-task
+
+# ------------------------ Training ------------------------ #
+training:
+  batch_size: 4
+  num_workers: 4
+  epochs: 300
+  optimizer: adamw
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  scheduler: cosine
+  warmup_epochs: 10
+  gradient_clip: 5.0
+
+# ------------------------ Loss Weights ------------------------ #
+loss:
+  seg_weight: 1.0
+  distill_weight: 0.5
+  evidence_weight: 0.3
+  uncertainty_weight: 0.6
+  temperature: 2.0
+  beta: 0.6
+
+# ------------------------ Model ------------------------ #
+model:
+  backbone: meamt_net
+  use_edge_attention: true
+  use_mamba: true
+  use_evidence: true
+  use_distillation: true
+
+# ------------------------ Logging & Evaluation ------------------------ #
+logging:
+  log_interval: 10
+  eval_interval: 1
+  save_interval: 50
+  save_path: ./checkpoints
+  tensorboard_path: ./runs
+
+# ------------------------ Testing ------------------------ #
+testing:
+  checkpoint_path: ./checkpoints/meamtnet_best.pth
+  save_output: true
+  output_dir: ./outputs
