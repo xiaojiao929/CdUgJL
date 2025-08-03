@@ -15,7 +15,6 @@ CdUgJL/
 ├── configs/
 │   └── default.yaml  
 ├── data/
-│   ├── __init__.py  
 │   ├── dataset.py  
 │   └── transforms.py  
 ├── models/
@@ -29,8 +28,7 @@ CdUgJL/
 │   ├── segmentation_loss.py  
 │   ├── distillation_loss.py  
 │   └── evidence_loss.py  
-├── utils/
-│   └── metrics.py  
+├── metrics.py 
 ├── train.py  
 ├── test.py  
 ├── eval/
@@ -39,66 +37,35 @@ CdUgJL/
 ├── scripts/
 │   ├── run_train.sh  
 │   └── run_test.sh  
-├── checkpoints/
-│   └── meamtnet_best.pth  
 └── docs/
     ├── architecture.md  
-    └── ablation_results.md  
+  
 ```
+1. Create Environment
+You can install the required dependencies via either requirements.txt or environment.yml.
 
-## Key Modules
+# Option 1: pip (recommended)
+pip install -r requirements.txt
 
-### 1. Backbone Network: Edge-Guided Attention + Mamba
+# Option 2: conda (optional)
+conda env create -f environment.yml
+conda activate cd_ugjl
 
-- The backbone integrates edge-enhanced spatial attention to highlight tumor boundaries and employs **Mamba** (a state-space sequence model) to capture long-range dependencies and temporal dynamics.
-- Inputs: Non-contrast MRI modalities (e.g., T2FS + DWI)
-- Output: Deep feature maps for downstream tasks
+2. Download Dataset
+Download the LLD-MMRI dataset from: 👉 https://github.com/LMMMEng/LLD-MMRI-Dataset
 
-### 2. Multi-task Decoders
+Place the dataset under the data/ directory and modify the path in configs/default.yaml accordingly:
+data_root: ./data/LLD-MMRI
 
-- **Segmentation Decoder:** Predicts tumor masks with hierarchical feature fusion
-- **Quantification Decoder:** Estimates spatial (X, Y) and area measurements using regression heads
+3. Train the Model
+Run the training script:
+bash scripts/run_train.sh
+Or directly:
+python train.py --config default.yaml
 
-### 3. Evidential Uncertainty Estimation
-
-- Implemented via a dedicated `evidence_head.py`
-- Uses Dirichlet-based modeling to produce confidence-aware predictions
-- Contributes to both supervised loss (e.g., MSE) and regularization (KL divergence with prior)
-
-### 4. Cross-modal Knowledge Distillation (CdUgJL Module)
-
-- **Teacher:** Fully-supervised model trained on contrast-enhanced MRI (not used at inference)
-- **Student:** Learns from both labeled and unlabeled non-contrast images
-- **Distillation Losses:**
-  - Feature-level KD with attention alignment
-  - Contrastive loss for instance discrimination using positive (same region) and negative (different region) pairs
-  - KL divergence on evidence outputs
-
-### 5. Uncertainty-guided Consistency Learning
-
-- Guides student training using reliable regions (low epistemic uncertainty)
-- Consistency enforced between weak/strong augmentations across spatial and task dimensions
-
-## Training and Evaluation
-
-- **Training Modes:**
-  - Fully-supervised: With 100% labels
-  - Semi-supervised: With 10% or 20% labels + unlabeled data
-
-- **Metrics:**
-  - Segmentation: Dice, HD95, ASD
-  - Quantification: MAE of X, Y, and Area
-  - Classification (optional): Accuracy, AUC
-
-- **Datasets:**
-  - Public: [LLD-MMRI](https://github.com/LMMMEng/LLD-MMRI-Dataset)
-  - Private: McGill In-house Dataset (not released)
-
----
-
-## Diagram
-
-Please take a look at the figure in the main paper (Figure 1) or supplementary file for a full visual depiction of the pipeline.
+4. Evaluate the Model
+Run the test script:
+bash scripts/run_test.sh
 
 
 
