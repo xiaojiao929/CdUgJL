@@ -8,7 +8,7 @@ Our method achieves state-of-the-art performance on the [LLD-MMRI dataset](https
 
 ## 📁 Project Structure
 ```
-MEaMt-Net/
+CdUgJL/
 ├── README.md  
 ├── requirements.txt  
 ├── setup.py  
