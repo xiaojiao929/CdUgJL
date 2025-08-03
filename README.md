@@ -49,40 +49,49 @@ CdUgJL/
   
 ```
 
----
-
 ## 🔧 Installation
 
-### 1. Clone the repository
+1. Clone the repository
 ```bash
 git clone https://github.com/xiaojiao929/CdUgJL.git
 cd CdUgJL
+```
 
-### 2. Set up environment (via Conda)
-
+ 2. Set up environment (via Conda)
+```bash
 conda env create -f environment.yml
 conda activate cd_ugjl
-
+```
 Or use pip:
-
+```
 pip install -r requirements.txt
+```
 
-🏋️‍♂️ Training
+## 🏋️‍♂️ Training
 To train the model from scratch:
+```
 python train.py --config configs/default.yaml
+```
 
 To resume from a checkpoint:
+```
 python train.py --config default.yaml --resume checkpoints/meamtnet_best.pth
+```
+## 🔍 Testing
 
-🔍 Testing
 To evaluate the model:
+```
 python test.py --config default.yaml --checkpoint checkpoints/meamtnet_best.pth
+```
 
-###  5.Compute segmentation and quantification metrics:
+## 📊 Evaluation
+
+Compute segmentation and quantification metrics:
+```
 python eval/evaluation_metrics.py \
   --ground_truth ./data/test \
   --predictions ./outputs/
-
+```
 
 
 
