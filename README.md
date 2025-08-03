@@ -1,9 +1,6 @@
-[1) Graphical abstract.pdf](https://github.com/user-attachments/files/21563686/1.Graphical.abstract.pdf)# CdUgJL
+
 # Contrastive-Driven and Uncertainty-Guided Joint Learning for Semi-Supervised Liver Tumor Segmentation,Uncertainty and Quantification
-
 <img width="654" height="269" alt="method" src="https://github.com/user-attachments/assets/cf8f853e-06d7-4143-a3be-16d23995400d" />
-
-
 
 ## 🔗 Dataset
 Our method achieves state-of-the-art performance on the [LLD-MMRI dataset](https://github.com/LMMMEng/LLD-MMRI-Dataset) under both fully- and semi-supervised settings.
