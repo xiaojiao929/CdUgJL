@@ -1,6 +1,7 @@
 
-# Contrastive-Driven and Uncertainty-Guided Joint Learning for Semi-Supervised Liver Tumor Segmentation,Uncertainty and Quantification
-<img width="654" height="269" alt="method" src="https://github.com/user-attachments/assets/cf8f853e-06d7-4143-a3be-16d23995400d" />
+# Contrastive-Driven and Uncertainty-Guided Joint Learning for Semi-Supervised Liver Tumor Segmentation and Quantification on Non-Contrast MRI
+<img width="718" height="405" alt="屏幕快照 2026-06-11 14 41 31" src="https://github.com/user-attachments/assets/a981002f-f9d6-47a3-8e79-b864425f012e" />
+
 
 ## 🚀 Highlights
 
