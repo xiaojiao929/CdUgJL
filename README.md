@@ -1,98 +1,122 @@
-
 # Contrastive-Driven and Uncertainty-Guided Joint Learning for Semi-Supervised Liver Tumor Segmentation and Quantification on Non-Contrast MRI
-<img width="718" height="405" alt="屏幕快照 2026-06-11 14 41 31" src="https://github.com/user-attachments/assets/a981002f-f9d6-47a3-8e79-b864425f012e" />
 
+## Highlights
 
-## 🚀 Highlights
+- **Cross-modal Knowledge Distillation**: Transfers knowledge from contrast-enhanced MRI (CE-MRI) to non-contrast modalities (T2FS, DWI).
+- **Evidential Uncertainty Modeling**: Dirichlet-based quantification of prediction reliability for both segmentation and quantification tasks.
+- **Joint Learning Framework**: Simultaneous tumor segmentation and biomarker quantification (X, Y, Area).
+- **Contrastive Representation Learning**: InfoNCE-based cross-modal feature alignment using teacher-student positive/negative pairs.
+- **Semi-supervised**: Trains with 10% or 20% labeled data.
 
-- **Cross-modal Knowledge Distillation**: Transfers knowledge from contrast-enhanced MRI (CEMRI) to non-contrast images (T2FS, DWI).
-- **Evidential Uncertainty Modeling**: Quantifies prediction reliability for segmentation and quantification.
-- **Joint Learning Framework**: Supports simultaneous tumor segmentation and biomarker quantification.
-- **Contrastive Representation Learning**: Enhances cross-modal feature alignment using positive/negative pair design.
+## Dataset
 
-## 🔗 Dataset
-Our method achieves state-of-the-art performance on the [LLD-MMRI dataset](https://github.com/LMMMEng/LLD-MMRI-Dataset) under both fully- and semi-supervised settings.
+[LLD-MMRI dataset](https://github.com/LMMMEng/LLD-MMRI-Dataset)
 
+## Project Structure
 
-## 📁 Project Structure
 ```
 CdUgJL/
-├── README.md  
-├── requirements.txt  
-├── setup.py  
 ├── configs/
-│   └── default.yaml  
+│   ├── __init__.py
+│   ├── default.py
+│   └── default.yaml
 ├── data/
-│   ├── dataset.py  
-│   └── transforms.py  
+│   ├── __init__.py
+│   ├── dataset.py
+│   └── transforms.py
 ├── models/
-│   ├── __init__.py  
-│   ├── meamt_net.py  
-│   ├── decoders.py  
-│   ├── evidence_head.py  
-│   └── distillation.py  
+│   ├── __init__.py
+│   ├── meamt_net.py       # Backbone: Edge-Guided Attention + Mamba encoder/decoder
+│   ├── decoders.py        # SegDecoder + QuantDecoder
+│   ├── evidence_head.py   # Dirichlet-based uncertainty head
+│   └── distillation.py    # Teacher-student distillation + contrastive projector
 ├── losses/
-│   ├── __init__.py  
-│   ├── segmentation_loss.py  
-│   ├── distillation_loss.py  
-│   └── evidence_loss.py  
-├── metrics.py 
-├── train.py  
-├── test.py  
+│   ├── __init__.py
+│   ├── segmentation_loss.py   # DiceCELoss
+│   ├── distillation_loss.py   # Feature KD + InfoNCE contrastive loss
+│   └── evidence_loss.py       # Uncertainty-weighted + KL Dirichlet loss
 ├── eval/
-│   ├── inference.py  
-│   └── evaluation_metrics.py  
+│   ├── __init__.py
+│   ├── inference.py           # run_inference (with TTA) + evaluate_model
+│   └── evaluation_metrics.py  # Standalone evaluation script
+├── utils/
+│   ├── __init__.py
+│   ├── metrics.py    # Dice, HD95, ASD, MAE
+│   ├── logger.py     # Logger + TensorBoard
+│   └── scheduler.py  # Cosine / step / poly LR schedulers
 ├── scripts/
-│   ├── run_train.sh  
-│   └── run_test.sh  
-└── docs/
-    ├── architecture.md  
-  
+│   ├── run_train.sh
+│   └── run_test.sh
+├── metrics.py
+├── train.py
+├── test.py
+├── requirements.txt
+├── environment.yml
+└── setup.py
 ```
 
-## 🔧 Installation
+## Installation
 
-1. Clone the repository
-```bash
-git clone https://github.com/xiaojiao929/CdUgJL.git
-cd CdUgJL
-```
-
- 2. Set up environment (via Conda)
 ```bash
 conda env create -f environment.yml
-conda activate cd_ugjl
+conda activate meamt-net
 ```
-Or use pip:
-```
+
+Or with pip:
+
+```bash
 pip install -r requirements.txt
 ```
 
-## 🏋️‍♂️ Training
-To train the model from scratch:
+## Data Preparation
+
+Organize your dataset as follows:
+
 ```
+data/LLD-MMRI/
+  train/
+    patient_001/
+      T2FS.npy    # [H, W] float32
+      DWI.npy
+      seg.npy     # [H, W] int64, 0=background, 1=tumor
+      quant.npy   # [3] float32: (x_center, y_center, area), normalized to [0,1]
+  val/
+    ...
+  test/
+    ...
+```
+
+## Training
+
+```bash
 python train.py --config configs/default.yaml
 ```
 
-To resume from a checkpoint:
-```
-python train.py --config default.yaml --resume checkpoints/meamtnet_best.pth
-```
-## 🔍 Testing
+Resume from checkpoint:
 
-To evaluate the model:
-```
-python test.py --config default.yaml --checkpoint checkpoints/meamtnet_best.pth
+```bash
+python train.py --config configs/default.yaml --resume checkpoints/meamtnet_best.pth
 ```
 
-## 📊 Evaluation
+## Testing
 
-Compute segmentation and quantification metrics:
+```bash
+python test.py --config configs/default.yaml \
+               --checkpoint checkpoints/meamtnet_best.pth \
+               --save_results --tta
 ```
+
+## Evaluation
+
+```bash
 python eval/evaluation_metrics.py \
-  --ground_truth ./data/test \
-  --predictions ./outputs/
+  --ground_truth ./data/LLD-MMRI/test \
+  --predictions ./outputs
 ```
 
+## Metrics
 
-
+| Task | Metric |
+|------|--------|
+| Segmentation | Dice, HD95, ASD |
+| Quantification | MAE (X, Y, Area) |

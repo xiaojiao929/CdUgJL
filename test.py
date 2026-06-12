@@ -1,79 +1,79 @@
-#Amber
-# ------------------------------------------------------------------------------
-# Copyright (c) 2025 Amber Xiao
-# Licensed under the MIT License.
-# ------------------------------------------------------------------------------
-
 import os
 import torch
 import argparse
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from configs.default import get_cfg_defaults
+from configs.default import load_config
 from data.dataset import MedicalImageDataset
+from data.transforms import get_transforms
 from models.meamt_net import MEaMtNet
 from utils.metrics import compute_all_metrics
 from eval.inference import run_inference
 from utils.logger import setup_logger
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="MEaMt-Net Testing Script")
-    parser.add_argument('--config', type=str, default='configs/default.yaml', help='Path to config file')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--save_results', action='store_true', help='Flag to save test predictions')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--checkpoint', required=True)
+    parser.add_argument('--save_results', action='store_true')
+    parser.add_argument('--tta', action='store_true', help='Test-time augmentation')
     return parser.parse_args()
+
 
 def main():
     args = parse_args()
-    cfg = get_cfg_defaults()
-    cfg.merge_from_file(args.config)
-    cfg.freeze()
+    cfg = load_config(args.config)
+    d_cfg = cfg['dataset']
+    t_cfg = cfg['testing']
+    m_cfg = cfg['model']
 
-    # Setup logger
-    logger = setup_logger("MEaMtNet-Test", output=cfg.OUTPUT_DIR, filename="test_log.txt")
-    logger.info("Running MEaMt-Net Evaluation")
-    logger.info(f"Using configuration: {cfg}")
+    output_dir = t_cfg.get('output_dir', './outputs')
+    os.makedirs(output_dir, exist_ok=True)
+    logger = setup_logger('MEaMtNet-Test', output=output_dir, filename='test_log.txt')
+    logger.log(f"Config: {args.config}  Checkpoint: {args.checkpoint}")
 
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Initialize dataset and dataloader
-    test_dataset = MedicalImageDataset(cfg.DATA.TEST_DIR, mode='test', transform=None)
-    test_loader = DataLoader(test_dataset, batch_size=cfg.TEST.BATCH_SIZE, shuffle=False, num_workers=cfg.DATA.NUM_WORKERS)
+    _, val_tfms = get_transforms(tuple(d_cfg['input_size']))
+    test_ds = MedicalImageDataset(d_cfg['root'], mode='test', transforms=val_tfms)
+    test_loader = DataLoader(test_ds, batch_size=t_cfg.get('batch_size', 1),
+                             shuffle=False, num_workers=cfg['training']['num_workers'])
 
-    # Initialize model
-    model = MEaMtNet(cfg)
+    model = MEaMtNet(m_cfg).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model = model.to(device)
     model.eval()
+    logger.log(f"Loaded checkpoint: {args.checkpoint}")
 
-    # Inference and evaluation
     all_metrics = []
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Evaluating"):
-            inputs = batch['input'].to(device)
+        for batch in tqdm(test_loader, desc='Testing'):
+            images = batch['image'].to(device)
             gt_seg = batch['seg'].to(device)
             gt_quant = batch['quant'].to(device)
 
-            pred_seg, pred_quant, _ = run_inference(model, inputs)
+            pred_seg, pred_quant, _ = run_inference(model, images, tta=args.tta)
 
-            # Compute metrics
-            metrics = compute_all_metrics(pred_seg, gt_seg, pred_quant, gt_quant)
-            all_metrics.append(metrics)
+            if (gt_seg >= 0).any():
+                metrics = compute_all_metrics(pred_seg, gt_seg, pred_quant, gt_quant,
+                                              d_cfg['num_classes'])
+                all_metrics.append(metrics)
 
-            # Optionally save predictions
             if args.save_results:
-                save_path = os.path.join(cfg.OUTPUT_DIR, "results")
-                os.makedirs(save_path, exist_ok=True)
-                torch.save(pred_seg.cpu(), os.path.join(save_path, batch['id'][0] + "_seg.pt"))
-                torch.save(pred_quant.cpu(), os.path.join(save_path, batch['id'][0] + "_quant.pt"))
+                for i, pid in enumerate(batch['id']):
+                    torch.save(pred_seg[i].cpu(), os.path.join(output_dir, f'{pid}_seg.pt'))
+                    torch.save(pred_quant[i].cpu(), os.path.join(output_dir, f'{pid}_quant.pt'))
 
-    # Aggregate results
-    mean_metrics = {key: sum([m[key] for m in all_metrics]) / len(all_metrics) for key in all_metrics[0]}
-    logger.info("Evaluation Results:")
-    for k, v in mean_metrics.items():
-        logger.info(f"{k}: {v:.4f}")
+    if all_metrics:
+        mean = {k: sum(m[k] for m in all_metrics if not (m[k] != m[k])) / len(all_metrics)
+                for k in all_metrics[0]}
+        logger.log("Results:")
+        for k, v in mean.items():
+            logger.log(f"  {k}: {v:.4f}")
+    else:
+        logger.log("No labeled test samples found — predictions saved only.")
+
 
 if __name__ == '__main__':
     main()
