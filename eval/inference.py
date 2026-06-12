@@ -1,76 +1,56 @@
-#Amber
-# Copyright (c) 2025 Amber Xiao
-
-import os
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from models.meamt_net import MEaMtNet
-from data.dataset import MedicalImageDataset
-from utils.metrics import compute_segmentation_metrics, compute_quantification_metrics
-from utils.visualizer import save_prediction_visuals
-from configs.default import get_config
+import torch.nn.functional as F
+import numpy as np
+from utils.metrics import compute_all_metrics
 
-def load_model(checkpoint_path, config, device):
-    model = MEaMtNet(config).to(device)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+
+def run_inference(model, inputs, tta=False):
+    """
+    Run model inference, optionally with test-time augmentation (horizontal + vertical flip).
+    Returns (seg_logits, quant_pred, outputs_dict).
+    """
     model.eval()
-    return model
+    with torch.no_grad():
+        out = model(inputs)
+        seg = out['seg']
+        quant = out['quant']
 
-def run_inference(config):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if tta:
+            # Horizontal flip
+            out_h = model(inputs.flip(-1))
+            seg = seg + out_h['seg'].flip(-1)
+            quant = quant + out_h['quant']
+            # Vertical flip
+            out_v = model(inputs.flip(-2))
+            seg = seg + out_v['seg'].flip(-2)
+            quant = quant + out_v['quant']
+            seg = seg / 3.0
+            quant = quant / 3.0
 
-    # Initialize dataset and dataloader
-    test_dataset = MedicalImageDataset(
-        data_root=config.DATA.TEST_DIR,
-        phase='test',
-        transforms=None  # You can apply test-time transforms if needed
-    )
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4)
+    return seg, quant, out
 
-    # Load trained model
-    model = load_model(config.CHECKPOINT_PATH, config, device)
 
-    # Output storage
-    results_dir = config.OUTPUT_DIR
-    os.makedirs(results_dir, exist_ok=True)
+@torch.no_grad()
+def evaluate_model(model, loader, device, num_classes=2):
+    """Run full validation loop and return mean Dice score."""
+    model.eval()
+    all_metrics = []
 
-    all_seg_metrics = []
-    all_q_metrics = []
+    for batch in loader:
+        images = batch['image'].to(device)
+        gt_seg = batch['seg'].to(device)
+        gt_quant = batch['quant'].to(device)
 
-    for batch in tqdm(test_loader, desc="Running inference"):
-        image = batch['image'].to(device)
-        seg_gt = batch['seg'].to(device)
-        q_gt = batch['quant'].to(device)
+        pred_seg, pred_quant, _ = run_inference(model, images)
 
-        with torch.no_grad():
-            outputs = model(image)
-            seg_pred = outputs['seg']
-            q_pred = outputs['quant']
+        valid = (gt_seg >= 0).any()
+        if not valid:
+            continue
 
-        # Compute metrics
-        seg_metrics = compute_segmentation_metrics(seg_pred, seg_gt)
-        q_metrics = compute_quantification_metrics(q_pred, q_gt)
+        metrics = compute_all_metrics(pred_seg, gt_seg, pred_quant, gt_quant, num_classes)
+        all_metrics.append(metrics)
 
-        all_seg_metrics.append(seg_metrics)
-        all_q_metrics.append(q_metrics)
+    if not all_metrics:
+        return 0.0
 
-        # Save visualization
-        save_prediction_visuals(image, seg_pred, seg_gt, save_dir=results_dir)
-
-    # Aggregate results
-    avg_seg_metrics = {k: sum(d[k] for d in all_seg_metrics) / len(all_seg_metrics) for k in all_seg_metrics[0]}
-    avg_q_metrics = {k: sum(d[k] for d in all_q_metrics) / len(all_q_metrics) for k in all_q_metrics[0]}
-
-    print("\nAverage Segmentation Metrics:")
-    for k, v in avg_seg_metrics.items():
-        print(f"{k}: {v:.4f}")
-
-    print("\nAverage Quantification Metrics:")
-    for k, v in avg_q_metrics.items():
-        print(f"{k}: {v:.4f}")
-
-if __name__ == "__main__":
-    config = get_config()
-    run_inference(config)
+    return float(np.mean([m['dice'] for m in all_metrics]))
