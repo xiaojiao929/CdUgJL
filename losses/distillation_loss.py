@@ -1,68 +1,56 @@
-#Amber
-# Copyright (c) 2025 Amber Xiao
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DistillationLoss(nn.Module):
-    """
-    KL divergence + Contrastive loss for model component distillation.
+class FeatureKDLoss(nn.Module):
+    """MSE loss between teacher and student feature projections."""
 
-    - KL loss encourages alignment of predicted distributions between teacher and student.
-    - Contrastive loss encourages matching representations between modalities via InfoNCE.
+    def forward(self, student_proj, teacher_proj):
+        if teacher_proj is None:
+            return torch.tensor(0.0, device=student_proj.device)
+        return F.mse_loss(student_proj, teacher_proj.detach())
 
-    Args:
-        temperature (float): Temperature for contrastive loss.
-        contrastive_weight (float): Weight for the contrastive loss.
-        kl_weight (float): Weight for the KL divergence loss.
+
+class ContrastiveLoss(nn.Module):
     """
-    def __init__(self, temperature=0.5, contrastive_weight=1.0, kl_weight=1.0):
-        super(DistillationLoss, self).__init__()
+    InfoNCE contrastive loss.
+    Positive pair: teacher-student projections from the same sample.
+    Negative pairs: projections from other samples in the batch.
+    """
+
+    def __init__(self, temperature=0.07):
+        super().__init__()
         self.temperature = temperature
-        self.contrastive_weight = contrastive_weight
-        self.kl_weight = kl_weight
-        self.kl_criterion = nn.KLDivLoss(reduction='batchmean')
 
-    def forward(self, student_logits, teacher_logits, student_feat, teacher_feat):
-        """
-        Args:
-            student_logits (Tensor): Output logits from student model (B, C, H, W)
-            teacher_logits (Tensor): Output logits from teacher model (B, C, H, W)
-            student_feat (Tensor): Student feature vector (B, D)
-            teacher_feat (Tensor): Teacher feature vector (B, D)
+    def forward(self, student_proj, teacher_proj):
+        if teacher_proj is None:
+            return torch.tensor(0.0, device=student_proj.device)
 
-        Returns:
-            total_loss: Combined loss
-            loss_dict: Dictionary of detailed components
-        """
-        # KL divergence loss
-        student_log_prob = F.log_softmax(student_logits / self.temperature, dim=1)
-        teacher_prob = F.softmax(teacher_logits / self.temperature, dim=1)
-        kl_loss = self.kl_criterion(student_log_prob, teacher_prob) * (self.temperature ** 2)
+        B = student_proj.shape[0]
+        s = F.normalize(student_proj, dim=1)
+        t = F.normalize(teacher_proj.detach(), dim=1)
 
-        # Contrastive loss
-        contrastive_loss = self.compute_contrastive_loss(student_feat, teacher_feat)
+        logits = torch.mm(s, t.T) / self.temperature      # [B, B]
+        labels = torch.arange(B, device=s.device)
+        loss_s2t = F.cross_entropy(logits, labels)
+        loss_t2s = F.cross_entropy(logits.T, labels)
+        return (loss_s2t + loss_t2s) / 2.0
 
-        total = self.kl_weight * kl_loss + self.contrastive_weight * contrastive_loss
-        return total, {
-            'kl_loss': kl_loss.item(),
-            'contrastive_loss': contrastive_loss.item(),
-            'total': total.item()
-        }
 
-    def compute_contrastive_loss(self, student, teacher):
-        """
-        Computes contrastive loss using InfoNCE.
-        Positive pairs: student-teacher within same sample.
-        Negative pairs: cross-sample mismatches.
-        """
-        B = student.size(0)
-        student = F.normalize(student, dim=1)
-        teacher = F.normalize(teacher, dim=1)
+class DistillationLoss(nn.Module):
+    def __init__(self, temperature=0.07, feat_weight=1.0, contra_weight=1.0):
+        super().__init__()
+        self.feat_kd = FeatureKDLoss()
+        self.contrastive = ContrastiveLoss(temperature)
+        self.feat_w = feat_weight
+        self.contra_w = contra_weight
 
-        logits = torch.matmul(student, teacher.T) / self.temperature
-        labels = torch.arange(B).to(student.device)
-        loss = F.cross_entropy(logits, labels)
-        return loss
+    def forward(self, outputs):
+        s_proj = outputs.get('student_proj')
+        t_proj = outputs.get('teacher_proj')
+        if s_proj is None or t_proj is None:
+            return torch.tensor(0.0)
+        feat_loss = self.feat_kd(s_proj, t_proj)
+        contra_loss = self.contrastive(s_proj, t_proj)
+        return self.feat_w * feat_loss + self.contra_w * contra_loss

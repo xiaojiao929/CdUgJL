@@ -1,104 +1,64 @@
-#Amber
-# Copyright (c) 2025 Amber Xiao
-
-"""
-evidence_loss.py
-
-This module implements evidential loss functions for uncertainty-aware learning.
-Specifically, it includes the Evidential Mean Square Error (EMSE) and
-the Kullback–Leibler divergence for regularizing uncertainty estimation.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def relu_evidence(logits):
+def kl_divergence_dirichlet(alpha, num_classes):
+    """KL(Dir(alpha) || Dir(1)) regularization."""
+    sum_alpha = alpha.sum(dim=1)
+    lgamma_sum = torch.lgamma(sum_alpha)
+    lgamma_k = torch.lgamma(torch.tensor(float(num_classes), device=alpha.device))
+    lgamma_alpha = torch.lgamma(alpha).sum(dim=1)
+    lgamma_ones = torch.lgamma(torch.ones_like(alpha)).sum(dim=1)
+
+    kl = (lgamma_sum - lgamma_k - lgamma_alpha + lgamma_ones
+          + ((alpha - 1.0) * (torch.digamma(alpha)
+             - torch.digamma(sum_alpha.unsqueeze(1)))).sum(dim=1))
+    return kl.mean()
+
+
+class EvidenceLoss(nn.Module):
     """
-    Converts raw network outputs into evidence using ReLU activation.
-    Evidence is used to parameterize the Dirichlet distribution.
+    Combines uncertainty-weighted MSE (segmentation) and KL regularization
+    for the Dirichlet-based evidential uncertainty head.
     """
-    return F.relu(logits)
 
+    def __init__(self, beta=0.6, kl_weight=0.01):
+        super().__init__()
+        self.beta = beta
+        self.kl_weight = kl_weight
 
-def kl_divergence(alpha, num_classes, coeff=1.0):
-    """
-    Computes the KL divergence between the predicted Dirichlet distribution and the uniform Dirichlet prior.
+    def forward(self, outputs, seg_target, quant_target=None):
+        device = seg_target.device
+        total = torch.tensor(0.0, device=device)
 
-    Args:
-        alpha (Tensor): Predicted Dirichlet parameters of shape (B, C)
-        num_classes (int): Number of classes (C)
-        coeff (float): Regularization coefficient for KL loss
-    Returns:
-        Tensor: KL divergence loss
-    """
-    beta = torch.ones((1, num_classes), dtype=torch.float32).to(alpha.device)
-    S_alpha = torch.sum(alpha, dim=1, keepdim=True)
-    S_beta = torch.sum(beta, dim=1, keepdim=True)
+        if 'seg_alpha' not in outputs:
+            return total
 
-    lnB = torch.lgamma(S_alpha) - torch.sum(torch.lgamma(alpha), dim=1, keepdim=True)
-    lnB_uni = torch.sum(torch.lgamma(beta), dim=1, keepdim=True) - torch.lgamma(S_beta)
+        seg_alpha = outputs['seg_alpha']                    # [B, C, H, W]
+        seg_uncertainty = outputs['seg_uncertainty']        # [B, 1, H, W]
+        num_cls = seg_alpha.shape[1]
 
-    dg0 = torch.digamma(S_alpha)
-    dg1 = torch.digamma(alpha)
+        # Uncertainty-weighted segmentation CE
+        seg_prob = seg_alpha / seg_alpha.sum(dim=1, keepdim=True)
+        ce = F.cross_entropy(torch.log(seg_prob + 1e-8), seg_target.long(), reduction='none')
+        weight = (1.0 - seg_uncertainty.squeeze(1)).clamp(0, 1)
+        total = total + (ce * weight).mean()
 
-    kl = torch.sum((alpha - beta) * (dg1 - dg0), dim=1, keepdim=True) + lnB + lnB_uni
-    return coeff * kl.mean()
+        # KL regularization on segmentation Dirichlet
+        alpha_flat = seg_alpha.permute(0, 2, 3, 1).reshape(-1, num_cls)
+        total = total + self.kl_weight * kl_divergence_dirichlet(alpha_flat, num_cls)
 
+        # Quantification evidence loss — skip entries with target == -1
+        if quant_target is not None and 'quant_alpha' in outputs:
+            valid = (quant_target >= 0).all(dim=1)           # [B]
+            if valid.any():
+                quant_alpha = outputs['quant_alpha'][valid]  # [B', quant_dim]
+                qt = quant_target[valid].float()
+                quant_S = quant_alpha.sum(dim=1, keepdim=True)
+                quant_mean = quant_alpha / quant_S
+                quant_loss = F.mse_loss(quant_mean, qt)
+                total = total + self.beta * quant_loss
+                total = total + self.kl_weight * kl_divergence_dirichlet(quant_alpha, quant_alpha.shape[1])
 
-def edl_mse_loss(predict_logits, targets, epoch, num_classes, annealing_step):
-    """
-    Computes the evidential mean square error loss with KL regularization.
-
-    Args:
-        predict_logits (Tensor): Raw network outputs before softmax (B, C)
-        targets (Tensor): Ground truth labels (B,)
-        epoch (int): Current training epoch
-        num_classes (int): Total number of classes
-        annealing_step (int): Number of epochs for KL annealing
-    Returns:
-        Tensor: Total evidential loss (MSE + KL)
-    """
-    evidence = relu_evidence(predict_logits)
-    alpha = evidence + 1
-    S = torch.sum(alpha, dim=1, keepdim=True)
-    pred = alpha / S
-
-    # One-hot encode the ground truth
-    targets_one_hot = F.one_hot(targets, num_classes=num_classes).float()
-
-    # Mean squared error between predictions and one-hot labels
-    mse_loss = torch.sum((targets_one_hot - pred) ** 2, dim=1, keepdim=True)
-    var = alpha * (S - alpha) / (S * S * (S + 1))
-    mse_loss += torch.sum(var, dim=1, keepdim=True)
-
-    # Annealing coefficient for KL term
-    annealing_coeff = min(1.0, epoch / annealing_step)
-    kl_loss = kl_divergence(alpha, num_classes)
-
-    return mse_loss.mean() + annealing_coeff * kl_loss
-
-
-class EvidentialLoss(nn.Module):
-    """
-    Wrapper class for evidential classification loss used in uncertainty modeling.
-    """
-    def __init__(self, num_classes=4, annealing_step=10):
-        super(EvidentialLoss, self).__init__()
-        self.num_classes = num_classes
-        self.annealing_step = annealing_step
-
-    def forward(self, predict_logits, targets, epoch):
-        """
-        Compute evidential loss.
-
-        Args:
-            predict_logits (Tensor): Raw output from evidence head (B, C)
-            targets (Tensor): Ground truth labels (B,)
-            epoch (int): Current training epoch
-
-        Returns:
-            Tensor: Evidential loss
-        """
-        return edl_mse_loss(predict_logits, targets, epoch, self.num_classes, self.annealing_step)
+        return total
