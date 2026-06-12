@@ -1,53 +1,50 @@
-#Amber
-# MIT License
-# Copyright (c) 2025 Amber Xiao
-
-"""
-
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class EvidenceHead(nn.Module):
     """
-    Evidence-based head for uncertainty-aware segmentation.
-    Predicts Dirichlet parameters instead of softmax probabilities.
+    Dirichlet-based evidential uncertainty estimation.
+
+    Maps segmentation logits and quantification predictions to Dirichlet
+    concentration parameters (alpha). Epistemic uncertainty is derived from
+    the total evidence S = sum(alpha_i) and number of classes K:
+        u = K / S
     """
-    def __init__(self, in_channels, out_channels, evidence_fn='relu'):
-        super(EvidenceHead, self).__init__()
-        self.evidence_fn = evidence_fn
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu1 = nn.ReLU(inplace=True)
+    def __init__(self, num_classes, quant_dim):
+        super().__init__()
+        self.num_classes = num_classes
+        self.quant_dim = quant_dim
 
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.seg_evidence = nn.Sequential(
+            nn.Conv2d(num_classes, num_classes, 1),
+            nn.Softplus(),
+        )
+        self.quant_evidence = nn.Sequential(
+            nn.Linear(quant_dim, quant_dim),
+            nn.Softplus(),
+        )
 
-        self.output_conv = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+    def forward(self, seg_logits, quant_pred):
+        # Segmentation evidence
+        seg_alpha = self.seg_evidence(seg_logits) + 1.0     # alpha >= 1
+        seg_S = seg_alpha.sum(dim=1, keepdim=True)
+        seg_prob = seg_alpha / seg_S
+        seg_uncertainty = self.num_classes / seg_S          # [B, 1, H, W]
 
-    def forward(self, x):
-        """
-        Returns the Dirichlet evidence (non-negative) for each class.
-        """
-        x = self.relu1(self.bn1(self.conv1(x)))
-        x = self.relu2(self.bn2(self.conv2(x)))
-        evidence = self.output_conv(x)
-        evidence = self.apply_evidence_activation(evidence)
-        return evidence
+        # Quantification evidence
+        quant_alpha = self.quant_evidence(quant_pred) + 1.0
+        quant_S = quant_alpha.sum(dim=1, keepdim=True)
+        quant_uncertainty = self.quant_dim / quant_S        # [B, 1]
 
-    def apply_evidence_activation(self, x):
-        """
-        Applies a non-negative activation function to ensure evidence ≥ 0.
-        """
-        if self.evidence_fn == 'relu':
-            return F.relu(x)
-        elif self.evidence_fn == 'softplus':
-            return F.softplus(x)
-        elif self.evidence_fn == 'exp':
-            return torch.exp(x)
-        else:
-            raise NotImplementedError(f"Unsupported evidence function: {self.evidence_fn}")
+        return {
+            'seg_alpha': seg_alpha,
+            'seg_prob': seg_prob,
+            'seg_uncertainty': seg_uncertainty,
+            'quant_alpha': quant_alpha,
+            'quant_uncertainty': quant_uncertainty,
+            'evidence': {'seg': seg_alpha, 'quant': quant_alpha},
+            'uncertainty': {'seg': seg_uncertainty, 'quant': quant_uncertainty},
+        }

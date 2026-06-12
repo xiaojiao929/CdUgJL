@@ -1,86 +1,66 @@
-#Amber
-# MIT License
-# Copyright (c) 2025 Amber Xiao
-
-"""
-distillation.py
-
-Implements the uncertainty-aware knowledge distillation mechanism for MEaMt-Net.
-It incorporates uncertainty-based guidance and consistency regularization between teacher and student models.
-This file handles both feature-level and prediction-level distillation.
-
-Author: Amber Xiao
-Date: 2025
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .meamt_net import MEaMtNet
 
 
-class UncertaintyAwareDistiller(nn.Module):
+class FeatureProjector(nn.Module):
+    """Projects features to a shared embedding space for contrastive learning."""
+
+    def __init__(self, in_ch, proj_dim=128):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(in_ch, proj_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(proj_dim, proj_dim),
+        )
+
+    def forward(self, x):
+        return F.normalize(self.proj(x), dim=1)
+
+
+class Distiller(nn.Module):
     """
-    Module for uncertainty-guided knowledge distillation.
-    Incorporates logit-based distillation and consistency loss using uncertainty weights.
-    """
+    Teacher-student distillation module.
 
-    def __init__(self, temperature=2.0):
-        super(UncertaintyAwareDistiller, self).__init__()
-        self.temperature = temperature
-        self.kl_div = nn.KLDivLoss(reduction='none')  # used for soft logit matching
-
-    def forward(self, student_logits, teacher_logits, uncertainty=None):
-        """
-        Compute the distillation loss between teacher and student logits,
-        optionally guided by uncertainty.
-
-        Args:
-            student_logits (Tensor): [B, C, H, W] logits from student model
-            teacher_logits (Tensor): [B, C, H, W] logits from teacher model
-            uncertainty (Tensor or None): [B, 1, H, W] uncertainty map (lower => confident)
-
-        Returns:
-            distill_loss (Tensor): scalar loss value
-        """
-        # Apply temperature scaling
-        student_soft = F.log_softmax(student_logits / self.temperature, dim=1)
-        teacher_soft = F.softmax(teacher_logits / self.temperature, dim=1)
-
-        # Compute pixel-wise KL divergence
-        kl = self.kl_div(student_soft, teacher_soft).sum(1, keepdim=True)  # [B, 1, H, W]
-
-        if uncertainty is not None:
-            # Normalize uncertainty map to [0,1]
-            normalized_uncertainty = torch.sigmoid(-uncertainty)  # higher confidence → higher weight
-            kl = kl * normalized_uncertainty
-
-        return kl.mean()
-
-class FeatureConsistencyLoss(nn.Module):
-    """
-    Enforces similarity between intermediate features of teacher and student models.
+    Teacher: trained on contrast-enhanced MRI (CE-MRI), frozen during student training.
+    Student: trained on non-contrast MRI (T2FS + DWI) with supervised + distillation losses.
+    Contrastive pairs are formed between teacher and student feature projections.
     """
 
-    def __init__(self, reduction='mean'):
-        super(FeatureConsistencyLoss, self).__init__()
-        self.reduction = reduction
+    def __init__(self, teacher: MEaMtNet, student: MEaMtNet, proj_dim=128):
+        super().__init__()
+        self.teacher = teacher
+        self.student = student
 
-    def forward(self, student_feat, teacher_feat, mask=None):
-        """
-        Compute L2 loss between student and teacher feature maps.
+        # Freeze teacher
+        for p in self.teacher.parameters():
+            p.requires_grad_(False)
+        self.teacher.eval()
 
-        Args:
-            student_feat (Tensor): [B, C, H, W]
-            teacher_feat (Tensor): [B, C, H, W]
-            mask (Tensor or None): Optional weighting mask [B, 1, H, W]
+        # Determine bottleneck channel from student
+        base = student.stem[0].out_channels
+        bn_ch = base * 16
 
-        Returns:
-            feature_loss (Tensor): scalar loss
-        """
-        diff = (student_feat - teacher_feat) ** 2  # [B, C, H, W]
+        self.teacher_projector = FeatureProjector(bn_ch, proj_dim)
+        self.student_projector = FeatureProjector(bn_ch, proj_dim)
 
-        if mask is not None:
-            diff = diff * mask
+    def forward(self, student_input, teacher_input=None):
+        student_out = self.student(student_input)
+        s_feat = student_out['features']
+        s_proj = self.student_projector(s_feat)
 
-        loss = diff.mean() if self.reduction == 'mean' else diff.sum()
-        return loss
+        t_proj = None
+        t_out = None
+        if teacher_input is not None and self.training:
+            with torch.no_grad():
+                t_out = self.teacher(teacher_input)
+            t_feat = t_out['features']
+            t_proj = self.teacher_projector(t_feat)
+
+        student_out['student_proj'] = s_proj
+        student_out['teacher_proj'] = t_proj
+        student_out['teacher_out'] = t_out
+        return student_out

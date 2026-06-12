@@ -1,131 +1,139 @@
-#Amber
-# MIT License
-# Copyright (c) 2025 Amber Xiao
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .decoders import SegmentationDecoder, QuantificationDecoder
+from .decoders import SegDecoder, QuantDecoder
 from .evidence_head import EvidenceHead
 
-# -----------------------
-# Basic Building Blocks
-# -----------------------
+try:
+    from mamba_ssm import Mamba
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+
+class ConvBnRelu(nn.Sequential):
+    def __init__(self, in_ch, out_ch, kernel=3, stride=1, padding=1):
+        super().__init__(
+            nn.Conv2d(in_ch, out_ch, kernel, stride, padding, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+        )
+
+
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = ConvBnRelu(channels, channels)
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv2(self.conv1(x)) + x)
+
+
+class EdgeGuidedAttention(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.edge_conv = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels, bias=False),
+            nn.Conv2d(in_channels, in_channels, 1, bias=False),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
         )
-
-    def forward(self, x):
-        return self.block(x)
-
-class Downsample(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.down = nn.Sequential(
-            nn.MaxPool2d(2),
-            ConvBlock(in_ch, out_ch)
+        self.gate = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels, 1, bias=False),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
-        return self.down(x)
+        edge = self.edge_conv(x)
+        att = self.gate(torch.cat([x, edge], dim=1))
+        return x * att + edge * (1.0 - att)
 
-class Upsample(nn.Module):
-    def __init__(self, in_ch, out_ch):
+
+class MambaBlock(nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        self.up = nn.ConvTranspose2d(in_ch, out_ch, 2, stride=2)
-        self.conv = ConvBlock(in_ch, out_ch)
-
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-# -----------------------
-# Edge-guided Attention
-# -----------------------
-
-class EdgeAttention(nn.Module):
-    def __init__(self, in_ch):
-        super().__init__()
-        self.edge_conv = nn.Conv2d(in_ch, 1, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, feat):
-        edge_map = self.sigmoid(self.edge_conv(feat))
-        return feat * edge_map + feat
-
-# -----------------------
-# Mamba-style Global Module (Placeholder)
-# -----------------------
-
-class MambaGlobalBlock(nn.Module):
-    def __init__(self, in_ch):
-        super().__init__()
-        # placeholder for actual mamba
-        self.global_fc = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(in_ch, in_ch),
-            nn.ReLU(),
-            nn.Linear(in_ch, in_ch),
-        )
+        self.norm = nn.LayerNorm(dim)
+        if HAS_MAMBA:
+            self.ssm = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+        else:
+            self.ssm = nn.MultiheadAttention(dim, num_heads=max(1, dim // 64), batch_first=True)
+        self.use_mamba = HAS_MAMBA
 
     def forward(self, x):
-        b, c, h, w = x.size()
-        global_feat = self.global_fc(x).view(b, c, 1, 1)
-        return x + global_feat.expand_as(x)
+        B, C, H, W = x.shape
+        seq = x.flatten(2).transpose(1, 2)          # [B, H*W, C]
+        normed = self.norm(seq)
+        if self.use_mamba:
+            out = self.ssm(normed)
+        else:
+            out, _ = self.ssm(normed, normed, normed)
+        return (out + seq).transpose(1, 2).reshape(B, C, H, W)
 
-# -----------------------
-# MEaMt-Net Backbone
-# -----------------------
+
+class EncoderStage(nn.Module):
+    def __init__(self, in_ch, out_ch, use_edge=True):
+        super().__init__()
+        self.downsample = ConvBnRelu(in_ch, out_ch, stride=2)
+        self.res = ResBlock(out_ch)
+        self.edge_att = EdgeGuidedAttention(out_ch) if use_edge else nn.Identity()
+
+    def forward(self, x):
+        x = self.edge_att(self.res(self.downsample(x)))
+        return x
+
 
 class MEaMtNet(nn.Module):
-    def __init__(self, in_channels=2, base_ch=32, num_classes=2):
+    def __init__(self, cfg):
         super().__init__()
-        self.encoder1 = ConvBlock(in_channels, base_ch)
-        self.encoder2 = Downsample(base_ch, base_ch * 2)
-        self.encoder3 = Downsample(base_ch * 2, base_ch * 4)
-        self.encoder4 = Downsample(base_ch * 4, base_ch * 8)
+        in_ch = cfg.get('in_channels', 2)
+        base = cfg.get('base_channels', 64)
+        num_cls = cfg.get('num_classes', 2)
+        quant_dim = cfg.get('quant_dim', 3)
+        use_edge = cfg.get('use_edge_attention', True)
+        use_mamba = cfg.get('use_mamba', True)
+        use_evi = cfg.get('use_evidence', True)
 
-        self.mamba_block = MambaGlobalBlock(base_ch * 8)
-        self.edge_attention = EdgeAttention(base_ch * 8)
+        self.stem = ConvBnRelu(in_ch, base, kernel=7, stride=1, padding=3)
 
-        self.decoder3 = Upsample(base_ch * 8, base_ch * 4)
-        self.decoder2 = Upsample(base_ch * 4, base_ch * 2)
-        self.decoder1 = Upsample(base_ch * 2, base_ch)
+        self.enc1 = EncoderStage(base, base * 2, use_edge)
+        self.enc2 = EncoderStage(base * 2, base * 4, use_edge)
+        self.enc3 = EncoderStage(base * 4, base * 8, use_edge)
 
-        self.seg_decoder = SegmentationDecoder(in_ch=base_ch, out_ch=num_classes)
-        self.quant_decoder = QuantificationDecoder(in_ch=base_ch)
-        self.evi_head = EvidenceHead(in_ch=base_ch)
+        self.bottleneck = nn.Sequential(
+            ConvBnRelu(base * 8, base * 16, stride=2),
+            ResBlock(base * 16),
+            MambaBlock(base * 16) if use_mamba else nn.Identity(),
+            ResBlock(base * 16),
+        )
+
+        self.seg_decoder = SegDecoder(
+            enc_channels=[base, base * 2, base * 4, base * 8],
+            bottleneck_ch=base * 16,
+            num_classes=num_cls,
+        )
+        self.quant_decoder = QuantDecoder(base * 16, quant_dim)
+
+        self.evidence_head = EvidenceHead(num_cls, quant_dim) if use_evi else None
 
     def forward(self, x):
-        e1 = self.encoder1(x)      # -> [B, C, H, W]
-        e2 = self.encoder2(e1)     # -> [B, 2C, H/2, W/2]
-        e3 = self.encoder3(e2)     # -> [B, 4C, H/4, W/4]
-        e4 = self.encoder4(e3)     # -> [B, 8C, H/8, W/8]
+        s0 = self.stem(x)                 # [B, 64, H, W]
+        s1 = self.enc1(s0)                # [B, 128, H/2, W/2]
+        s2 = self.enc2(s1)                # [B, 256, H/4, W/4]
+        s3 = self.enc3(s2)                # [B, 512, H/8, W/8]
+        bot = self.bottleneck(s3)         # [B, 1024, H/16, W/16]
 
-        edge_feat = self.edge_attention(e4)
-        global_feat = self.mamba_block(edge_feat)
+        seg_logits = self.seg_decoder(bot, [s0, s1, s2, s3])
+        quant_pred = self.quant_decoder(bot)
 
-        d3 = self.decoder3(global_feat, e3)
-        d2 = self.decoder2(d3, e2)
-        d1 = self.decoder1(d2, e1)
+        out = {'seg': seg_logits, 'quant': quant_pred, 'features': bot}
 
-        seg_out = self.seg_decoder(d1)
-        quant_out = self.quant_decoder(d1)
-        evidence_out = self.evi_head(d1)
+        if self.evidence_head is not None:
+            evi_out = self.evidence_head(seg_logits, quant_pred)
+            out.update(evi_out)
 
-        return {
-            "seg": seg_out, 
-            "quant": quant_out, 
-            "evidence": evidence_out
-        }
+        return out
