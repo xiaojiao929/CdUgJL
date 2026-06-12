@@ -1,90 +1,117 @@
-# Amber
-# MIT License
-# Copyright (c) 2025 Amber Xiao
-# 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-# 
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-# 
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
-import os
-import torch
 import numpy as np
+import torch
 from torch.utils.data import Dataset
-import nibabel as nib
-from torchvision import transforms
+from pathlib import Path
+
 
 class MedicalImageDataset(Dataset):
     """
-    Dataset for loading paired non-contrast and contrast-enhanced MRI images along with masks and quantification labels.
+    Multi-modal MRI dataset for liver tumor segmentation and quantification.
+
+    Expected directory layout:
+        root/
+          train/
+            patient_001/
+              T2FS.npy       # [H, W]
+              DWI.npy
+              seg.npy        # integer mask [H, W], 0=background, 1=tumor
+              quant.npy      # [3]: (x_center, y_center, area) normalized to [0,1]
+            patient_002/
+              ...
+          val/   (same structure)
+          test/  (same structure, quant.npy optional)
+
+    When label_ratio < 1.0, only that fraction of training samples has
+    seg / quant labels; the rest are returned with masks of -1 (ignored).
     """
-    def __init__(self, root_dir, modalities, transform=None, labeled=True):
-        super(MedicalImageDataset, self).__init__()
-        self.root_dir = root_dir
-        self.modalities = modalities
-        self.transform = transform
-        self.labeled = labeled
 
-        self.samples = self._load_samples()
+    # Non-contrast modalities fed to the student
+    STUDENT_MODALITIES = ['T2FS', 'DWI']
+    # CE-MRI modalities fed to the teacher (any one present is used)
+    TEACHER_MODALITIES = ['CE', 'T1CE', 'arterial', 'venous']
 
-    def _load_samples(self):
-        sample_list = []
-        for subject in os.listdir(self.root_dir):
-            subj_path = os.path.join(self.root_dir, subject)
-            if not os.path.isdir(subj_path):
-                continue
+    def __init__(self, root, mode='train', transforms=None, label_ratio=1.0,
+                 load_ce=True):
+        self.root = Path(root)
+        self.mode = mode
+        self.transforms = transforms
+        self.label_ratio = label_ratio if mode == 'train' else 1.0
+        self.load_ce = load_ce
 
-            try:
-                sample = {
-                    "T2FS": os.path.join(subj_path, "T2FS.nii.gz"),
-                    "DWI": os.path.join(subj_path, "DWI.nii.gz"),
-                    "mask": os.path.join(subj_path, "mask.nii.gz") if self.labeled else None,
-                    "quant": os.path.join(subj_path, "quant.npy") if self.labeled else None
-                }
-                sample_list.append(sample)
-            except:
-                continue
-        return sample_list
+        split_dir = self.root / mode
+        if not split_dir.exists():
+            raise FileNotFoundError(f"Split directory not found: {split_dir}")
+
+        self.samples = sorted([p for p in split_dir.iterdir() if p.is_dir()])
+        if not self.samples:
+            raise RuntimeError(f"No patient directories found in {split_dir}")
+
+        # Determine labeled subset
+        n_labeled = max(1, int(len(self.samples) * self.label_ratio))
+        self.labeled_ids = set(range(n_labeled))
 
     def __len__(self):
         return len(self.samples)
 
+    def _load_normalize(self, path):
+        arr = np.load(path).astype(np.float32)
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / (hi - lo + 1e-8)
+
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        inputs = []
+        patient_dir = self.samples[idx]
+        is_labeled = idx in self.labeled_ids
 
-        for mod in self.modalities:
-            img = nib.load(sample[mod]).get_fdata()
-            img = torch.tensor(img, dtype=torch.float32).unsqueeze(0)  # CxHxW
-            inputs.append(img)
+        # Student input: non-contrast modalities (T2FS + DWI)
+        image = np.stack(
+            [self._load_normalize(patient_dir / f'{m}.npy') for m in self.STUDENT_MODALITIES],
+            axis=0,
+        )  # [2, H, W]
 
-        image = torch.cat(inputs, dim=0)
+        # Teacher input: first available CE-MRI modality, or None
+        ce_image = None
+        if self.load_ce:
+            for mod in self.TEACHER_MODALITIES:
+                ce_path = patient_dir / f'{mod}.npy'
+                if ce_path.exists():
+                    ce_arr = self._load_normalize(ce_path)
+                    # Replicate to match student channel count so teacher uses same arch
+                    ce_image = np.stack([ce_arr] * len(self.STUDENT_MODALITIES), axis=0)
+                    break
 
-        if self.transform:
-            image = self.transform(image)
+        seg = (np.load(patient_dir / 'seg.npy').astype(np.int64)
+               if is_labeled
+               else np.full(image.shape[1:], -1, dtype=np.int64))
 
-        output = {"image": image}
+        quant_path = patient_dir / 'quant.npy'
+        quant = (np.load(quant_path).astype(np.float32)
+                 if (is_labeled and quant_path.exists())
+                 else np.full(3, -1.0, dtype=np.float32))
 
-        if self.labeled:
-            mask = nib.load(sample["mask"]).get_fdata()
-            mask = torch.tensor(mask, dtype=torch.long)
-            quant = np.load(sample["quant"])
-            output.update({
-                "mask": mask,
-                "quant": torch.tensor(quant, dtype=torch.float32)
-            })
+        sample = {
+            'image': image,
+            'seg': seg,
+            'quant': quant,
+            'id': patient_dir.name,
+            'labeled': is_labeled,
+            'has_ce': ce_image is not None,
+        }
 
-        return output
+        if self.transforms is not None:
+            sample = self.transforms(sample)
+            if ce_image is not None:
+                # Apply same spatial transforms to CE image (reuse ToTensor only)
+                ce_sample = {'image': ce_image, 'seg': seg, 'quant': quant}
+                ce_sample = self.transforms(ce_sample)
+                sample['ce_image'] = ce_sample['image']
+            else:
+                sample['ce_image'] = torch.zeros_like(sample['image'])
+        else:
+            sample['image'] = torch.from_numpy(image)
+            sample['seg'] = torch.from_numpy(seg)
+            sample['quant'] = torch.from_numpy(quant)
+            sample['ce_image'] = (torch.from_numpy(ce_image)
+                                  if ce_image is not None
+                                  else torch.zeros_like(sample['image']))
+
+        return sample
